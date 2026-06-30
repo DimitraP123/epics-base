@@ -17,6 +17,7 @@ DBD += asSub.dbd
 DBD += softIoc.dbd
 
 softIoc_DBD += base.dbd
+softIoc_DBD += websrv.dbd
 softIoc_DBD += dlload.dbd
 softIoc_DBD += system.dbd
 

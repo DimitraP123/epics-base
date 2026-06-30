@@ -15,6 +15,7 @@ IOCDIR = $(SRC)/ioc
 
 LIBRARY_IOC += dbCore
 dbCore_LIBS += ca Com
+dbCore_SYS_LIBS += drogon trantor
 dbCore_SYS_LIBS_WIN32 += ws2_32
 
 dbCore_RCS += dbCore.rc
@@ -33,6 +34,7 @@ include $(IOCDIR)/dbtemplate/Makefile
 include $(IOCDIR)/misc/Makefile
 include $(IOCDIR)/registry/Makefile
 include $(IOCDIR)/rsrv/Makefile
+include $(IOCDIR)/websrv/Makefile
 
 EXPANDVARS += EPICS_DATABASE_MAJOR_VERSION
 EXPANDVARS += EPICS_DATABASE_MINOR_VERSION
