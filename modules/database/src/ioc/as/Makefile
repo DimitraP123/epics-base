@@ -24,3 +24,5 @@ dbCore_SRCS += asIocRegister.c
 PROD_HOST += ascheck
 ascheck_SRCS = ascheck.c
 ascheck_LIBS = dbCore ca
+
+# ascheck_SYS_LIBS += drogon trantor

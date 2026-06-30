@@ -21,6 +21,7 @@ dbCore_API = dbCore
 
 LIBRARY_IOC += dbCore
 dbCore_LIBS += ca Com
+dbCore_SYS_LIBS += drogon trantor
 dbCore_SYS_LIBS_WIN32 += ws2_32
 
 dbCore_RCS += dbCore.rc
@@ -44,6 +45,7 @@ include $(IOCDIR)/dbtemplate/Makefile
 include $(IOCDIR)/misc/Makefile
 include $(IOCDIR)/registry/Makefile
 include $(IOCDIR)/rsrv/Makefile
+include $(IOCDIR)/websrv/Makefile
 
 GENVERSION = epicsVCS.h
 GENVERSIONMACRO = EPICS_VCS_VERSION
