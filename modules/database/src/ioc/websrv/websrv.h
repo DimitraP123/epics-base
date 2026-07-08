@@ -27,6 +27,23 @@
 extern "C" {
 #endif
 
+
+/*  NOTE: external used so they remember the state across loads */
+#ifdef  GLBLSOURCE
+#   define GLBLTYPE
+#else
+#   define GLBLTYPE extern
+#endif
+
+enum ctl {ctlRun, ctlPause};
+
+// Defining GLBLTYPE here so that it is visible to the web server code
+GLBLTYPE volatile enum ctl  websrvTCP_ctl;
+
+
+
+
+
 epicsShareFunc void websrv_register_server(void);
 
 epicsShareFunc void webserver_report (unsigned level);
