@@ -62,6 +62,7 @@ static void webserver_thread(void *);
 static Json::Value websrv_record_handling(const std::string& recordName);
 static Json::Value websrv_field_get(const std::string& recordName, const std::string& fieldName);
 static Json::Value websrv_field_put(const std::string& recordName, const std::string& fieldName, const std::string& fieldData);
+static void webserver_append_database_routes(std::ostringstream& body, bool includeFields);
 
 static const char *websrvAddress = "127.0.0.1";
 static const unsigned websrvPort = 8080;
@@ -101,20 +102,39 @@ static void webserver_init(void)
             },
             {drogon::Get}
         )
-         
-        .registerHandler("/report", [](const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback)
-            {
-            unsigned level = 1;
-            auto levelParam = req->getParameter("level");
-            if (!levelParam.empty()) {
-                level = std::stoul(levelParam);
-            }
 
-            auto resp = drogon::HttpResponse::newHttpResponse();
-            resp->setContentTypeCode(drogon::CT_TEXT_PLAIN);
-            resp->setBody(webserver_report_body(level));
-            callback(resp);
-            }
+        // Report handling route when no level is specified (defaults to level 0)
+        .registerHandler("/report", [](const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback)
+                {
+                    auto resp = drogon::HttpResponse::newHttpResponse();
+                    resp->setContentTypeCode(drogon::CT_TEXT_PLAIN);
+                    resp->setStatusCode(drogon::k200OK);
+                    resp->setBody(webserver_report_body(0));
+                    callback(resp);
+                },
+                {drogon::Get}
+            )
+ 
+        // Report handling route when a level is specified
+        .registerHandler("/report/{1}", [](const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback, const std::string& levelParam)
+            {
+                auto resp = drogon::HttpResponse::newHttpResponse();
+                resp->setContentTypeCode(drogon::CT_TEXT_PLAIN);
+
+                try {
+                    unsigned level = static_cast<unsigned>(std::stoul(levelParam));
+
+                    resp->setStatusCode(drogon::k200OK);
+                    resp->setBody(webserver_report_body(level));
+                }
+                catch (const std::exception&) {
+                    resp->setStatusCode(drogon::k400BadRequest);
+                    resp->setBody("Invalid report level!\n");
+                }
+
+                callback(resp);
+            },
+            {drogon::Get}
         )
 
         // Record handling route
@@ -284,12 +304,12 @@ static std::string webserver_report_body(unsigned level)
         body << "Framework: Drogon\n";
     }
    
-    if (level == 1) {
+    else if (level == 1) {
         body << "Listening address: " << websrvAddress << "\n";
         body << "Listening port: " << websrvPort << "\n";
     }
 
-    if (level >= 2) {
+    else if (level == 2) {
         body << "Routes:\n";
         body << "/init\n";
         body << "/stats\n";
@@ -298,12 +318,66 @@ static std::string webserver_report_body(unsigned level)
         body << "/{record}/{field}\n";
     }
 
+    else if (level == 3) {
+        body << "-----PV RECORD LIST-----\n";
+        webserver_append_database_routes(body, false);
+    }
+
+    else if (level >= 4) {
+        body << "-----PV FIELDS LIST-----\n";
+        webserver_append_database_routes(body, true);
+    }
+
     return body.str();
 }
 
 void webserver_report (unsigned level)
 {   
     printf("%s", webserver_report_body(level).c_str());
+}
+
+static void webserver_append_database_routes(std::ostringstream& body, bool includeFields)
+{
+    DBENTRY *pdbentry = dbAllocEntry(pdbbase);
+
+    if (!pdbentry) {
+        body << "Unable to allocate DBENTRY\n";
+        return;
+    }
+
+    long recordTypeStatus = dbFirstRecordType(pdbentry);
+
+    while (!recordTypeStatus) {
+        long recordStatus = dbFirstRecord(pdbentry);
+
+        while (!recordStatus) {
+            const char *recordName = dbGetRecordName(pdbentry);
+
+            if (includeFields) {
+                long fieldStatus = dbFirstField(pdbentry, TRUE);
+
+                while (!fieldStatus) {
+                    const char *fieldName = dbGetFieldName(pdbentry);
+
+                    if (fieldName) {
+                        body << recordName << "/" << fieldName << "\n";
+                    }
+
+                    fieldStatus = dbNextField(pdbentry, TRUE);
+                }
+            }
+            
+            else if (recordName) {
+                body << recordName << "\n";
+            
+            }
+            recordStatus = dbNextRecord(pdbentry);
+        }
+
+        recordTypeStatus = dbNextRecordType(pdbentry);
+    }
+
+    dbFreeEntry(pdbentry);
 }
 
 void webserver_stats ( unsigned *pChanCount, unsigned *pCircuitCount )
