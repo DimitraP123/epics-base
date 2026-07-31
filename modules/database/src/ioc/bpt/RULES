@@ -12,4 +12,4 @@
 # This is a Makefile fragment, see src/ioc/Makefile.
 
 $(patsubst %,$(COMMON_DIR)/%,$(BPT_DBD)) : \
-    $(COMMON_DIR)/bpt%.dbd : $(MAKEBPT)
+    $(COMMON_DIR)/bpt%.dbd : $(EPICS_DATABASE_HOST_BIN)/makeBpt$(HOSTEXE)

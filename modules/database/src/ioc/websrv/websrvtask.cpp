@@ -21,6 +21,19 @@
 #include <limits.h>
 #include <errno.h>
 
+// websocket includes
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <sstream>
+#include <string>
+
+#include "dbChannel.h"
+
+
+
+
+
 #include "addrList.h"
 #include "epicsEvent.h"
 #include "epicsMutex.h"
@@ -48,6 +61,8 @@
 #include <dbStaticLib.h>
 
 #include <drogon/drogon.h>
+#include <drogon/WebSocketController.h>
+
 
 #define GLBLSOURCE
 #include "websrv.h"
@@ -66,6 +81,241 @@ static void webserver_append_database_routes(std::ostringstream& body, bool incl
 
 static const char *websrvAddress = "127.0.0.1";
 static const unsigned websrvPort = 8080;
+
+/*
+/ WebSocket Logic Starts  
+*/
+
+static dbEventCtx websrvEvents = nullptr;
+
+using namespace drogon;
+
+namespace {
+
+    // A WebSocket subscription structure that holds the state of a WebSocket connection and its EPICS db channel and event subscription
+    struct WebSocketSubscription
+    {
+        std::string recordName;
+        std::string fieldName;
+        std::string fullName;
+
+        dbChannel *channel{nullptr};
+
+        dbEventSubscription subscription{nullptr};
+
+        WebSocketConnectionPtr connection;
+
+        std::atomic<bool> closing{false};
+    };
+
+    // Removes extra whitespace from the WebSocket message 
+    static std::string websrv_sock_json(const Json::Value &value)
+    {
+        Json::StreamWriterBuilder builder;
+        builder["indentation"] = "";
+
+        return Json::writeString(builder, value);
+    }
+
+    // Parses the WebSocket path to extract the record and field names
+    static bool websrv_sock_parse_path(const std::string &path, std::string &recordName, std::string &fieldName)
+    {
+        if (path.empty() || path[0] != '/') {
+            return false;
+        }
+
+        const std::string target = path.substr(1);
+
+        const std::string::size_type fieldSeparator = target.find('/');
+
+        if (fieldSeparator == std::string::npos) {
+            recordName = target;
+            fieldName = "VAL";
+
+            return !recordName.empty();
+        }
+
+        recordName = target.substr(0, fieldSeparator);
+
+        fieldName = target.substr(fieldSeparator + 1);
+
+        return !recordName.empty() && !fieldName.empty();
+    }
+
+    static void sock_field_updated_event(void *userArgument, dbChannel *channel, int eventsRemaining, db_field_log *fieldLog)
+    {
+        //(void)eventsRemaining;
+
+        // Callback receives the state
+        auto *state = static_cast<WebSocketSubscription *>(userArgument);
+
+        // Checking if the connection is still usable
+        if (!state || state->closing.load() || !state->connection || !state->connection->connected()) {
+            return;
+        }
+
+        char fieldData[MAX_STRING_SIZE] = {};
+
+        long elementCount = 1;
+
+        // The callback reads the field
+        const long status = dbChannelGetField(channel, DBR_STRING, fieldData, nullptr, &elementCount, fieldLog);
+
+        // If status is zero, the callback successfully retrieved the field
+        if (status) {
+            return;
+        }
+
+        Json::Value response;
+
+        response["record"] = state->recordName;
+        response["field"] = state->fieldName;
+        response["field_data"] = fieldData;
+
+        const std::string updated_message_data = websrv_sock_json(response);
+
+        const WebSocketConnectionPtr connection = state->connection;
+        
+        //The WebSocket connection is sent onto Drogon's event loop
+        drogon::app().getLoop()->queueInLoop([connection, updated_message_data]()
+        {
+            if (connection && connection->connected()) {
+                connection->send(updated_message_data);
+            }
+        }
+        );
+    }
+} 
+
+// This class gives the behavior needed to handle WebSocket connections in a Drogon-based server
+class WebSocketStatusController : public drogon::WebSocketController< WebSocketStatusController, false>
+{
+public:
+    void handleNewConnection(const HttpRequestPtr &request, const WebSocketConnectionPtr &connection) override
+    {
+        std::string recordName;
+        std::string fieldName;
+
+        
+        // Extracts the target record and field from the WebSocket URL
+         
+        if (!websrv_sock_parse_path( request->path(), recordName, fieldName)) {
+
+            connection->send(R"({"type":"error","message":"Invalid WebSocket path"})");
+            connection->shutdown();
+            return;
+        }
+
+        // Creates a new shared WebSocket subscription state object for the current connection
+        auto state = std::make_shared<WebSocketSubscription>();
+
+        // Copies the parsed path information into the subscription state object
+        state->recordName = recordName;
+        state->fieldName = fieldName;
+        state->fullName = recordName + "." + fieldName;
+
+        state->connection = connection;
+
+        // Opens the EPICS db channel once for this connection
+        state->channel = dbChannelCreate(state->fullName.c_str());
+
+        if (!state->channel) {
+            connection->send(R"("message":"Record or field not found")");
+            connection->shutdown();
+            return;
+        }
+
+        if (dbChannelOpen(state->channel)) {
+            
+            dbChannelDelete(state->channel);
+            
+            state->channel = nullptr;
+
+            connection->send(R"("message":"Record or field not found")");
+
+            connection->shutdown();
+            return;
+        }
+
+        /*
+         * Create the EPICS event subscription.
+         *
+         * DBE_VALUE sends value-change events.
+         * DBE_ALARM also sends alarm-state changes.
+         */
+        state->subscription = db_add_event(websrvEvents, state->channel, sock_field_updated_event, state.get(), DBE_VALUE | DBE_ALARM);
+
+        if (!state->subscription) {
+            dbChannelDelete(state->channel);
+            
+            state->channel = nullptr;
+
+            connection->send(R"({"type":"error","message":"Unable to create event subscription"})");
+
+            connection->shutdown();
+            return;
+        }
+
+        // Storing the state in the Drogon connection
+        connection->setContext(state);
+
+        db_event_enable(state->subscription);
+
+        //Send the current value immediately
+         
+        db_post_single_event(state->subscription);
+
+        errlogPrintf("websrv: monitoring %s\n", state->fullName.c_str());
+    }
+
+    void handleNewMessage(const WebSocketConnectionPtr &connection, std::string &&message, const WebSocketMessageType &messageType) override
+    {
+        (void)connection;
+        (void)message;
+        (void)messageType;
+    }
+
+    void handleConnectionClosed(const WebSocketConnectionPtr &connection) override
+    {
+        auto state = connection->getContext<WebSocketSubscription>();
+
+        if (!state) {
+            return;
+        }
+
+        state->closing.store(true);
+
+        // Cancels the EPICS event before deleting the channel.
+        if (state->subscription) {
+            db_cancel_event(state->subscription);
+            state->subscription = nullptr;
+        }
+
+        if (state->channel) {
+            dbChannelDelete(state->channel);
+            state->channel = nullptr;
+        }
+
+        state->connection.reset();
+
+        errlogPrintf("websrv: WebSocket monitor disconnected\n");
+    }
+
+    WS_PATH_LIST_BEGIN
+
+    //One generic WebSocket route handles every EPICS record and field
+    WS_ADD_PATH_VIA_REGEX(R"(^/[^/]+/[^/]+$)", Get);
+
+    WS_PATH_LIST_END
+};
+
+
+// Keeps the registered controller alive for the lifetime of the IOC
+static std::shared_ptr<WebSocketStatusController> webserverWebSocketController;
+
+/*
+/ WebSocket Logic Ends 
+*/
 
 int webserver_client_initiating_current_thread ( char * pBuf, size_t bufSize )
 {
@@ -206,9 +456,32 @@ static void webserver_init(void)
         );
 
         /*
-        // Background Thread
-        // Runs the Drogon web server in a separate thread to avoid blocking the main EPICS thread
+        // WebSocket initialization starts 
         */
+        websrvEvents = db_init_events();
+
+        if (!websrvEvents) {
+            errlogPrintf(
+                "websrv: unable to initialize database events\n");
+            return;
+        }
+
+        const int eventStatus = db_start_events(websrvEvents, "websrvEvents", nullptr, nullptr, epicsThreadPriorityMedium);
+
+        if (eventStatus != DB_EVENT_OK) {
+            errlogPrintf("websrv: unable to start database event thread\n");
+
+            db_close_events(websrvEvents);
+            websrvEvents = nullptr;
+            return;
+        }
+        
+        webserverWebSocketController = std::make_shared<WebSocketStatusController>();
+
+        drogon::app().registerController(webserverWebSocketController);
+    /*
+    // WebSocket initialization ends 
+    */
 
         printf("Creating webserver background run thread!\n");
 
